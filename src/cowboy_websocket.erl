@@ -49,8 +49,11 @@
 	frag_state = undefined :: frag_state(),
 	utf8_state = <<>> :: binary(),
 	deflate_frame = false :: boolean(),
+	permessage_deflate = false :: boolean(),
 	inflate_state :: undefined | port(),
-	deflate_state :: undefined | port()
+	deflate_state :: undefined | port(),
+    deflate_takeover :: undefined | takeover | no_takeover,
+    inflate_takeover :: undefined | takeover | no_takeover
 }).
 
 -spec upgrade(Req, Env, module(), any())
@@ -114,14 +117,48 @@ websocket_extensions(State, Req) ->
 					{ok, State#state{
 						deflate_frame = true,
 						inflate_state = Inflate,
-						deflate_state = Deflate
+						deflate_state = Deflate,
+                        deflate_takeover = takeover,
+                        inflate_takeover = takeover
 					}, cowboy_req:set_meta(websocket_compress, true, Req2)};
 				_ ->
-					{ok, State, cowboy_req:set_meta(websocket_compress, false, Req2)}
+                    websocket_extensions2(Extensions, Compress, State, Req2)
 			end;
 		_ ->
 			{ok, State, cowboy_req:set_meta(websocket_compress, false, Req)}
 	end.
+
+websocket_extensions2(Extensions, true, State, Req2) ->
+    case lists:keyfind(<<"permessage-deflate">>, 1, Extensions) of
+        {<<"permessage-deflate">>, Params} ->
+            V2Extensions = #{},
+            Opts = #{level => best_compression, mem_level => 8, strategy => default},
+            case cow_ws2:negotiate_permessage_deflate(Params, V2Extensions, Opts) of
+                ignore ->
+                    {ok, State, cowboy_req:set_meta(websocket_compress, false, Req2)};
+                {ok, RespExt, V2Extensions2} ->
+                    Req3 = cowboy_req:set_resp_header(<<"Sec-WebSocket-Extensions">>, RespExt, Req2),
+                    Inflate = maps:get(inflate, V2Extensions2),
+                    Deflate = maps:get(deflate, V2Extensions2),
+                    InflateTakeover = maps:get(inflate_takeover, V2Extensions2),
+                    DeflateTakeover = maps:get(deflate_takeover, V2Extensions2),
+                    State2 = State#state{
+                        permessage_deflate = true,
+						deflate_frame = true,
+						inflate_state = Inflate,
+						deflate_state = Deflate,
+                        inflate_takeover = InflateTakeover,
+                        deflate_takeover = DeflateTakeover
+					},
+                    Req4 = cowboy_req:set_meta(websocket_compress, true, Req3),
+                    Req5 = cowboy_req:set_meta(permessage_deflate, true, Req4),
+                    {ok, State2, Req5}
+            end;
+        _ ->
+            {ok, State, cowboy_req:set_meta(websocket_compress, false, Req2)}
+    end;
+websocket_extensions2(_Extensions, _, State, Req2) ->
+    {ok, State, cowboy_req:set_meta(websocket_compress, false, Req2)}.
 
 -spec handler_init(#state{}, Req, any())
 	-> {ok, Req, cowboy_middleware:env()} | {suspend, module(), atom(), [any()]}
@@ -160,11 +197,12 @@ handler_init(State=#state{env=Env, transport=Transport,
 	| {suspend, module(), atom(), [any()]}
 	when Req::cowboy_req:req().
 websocket_handshake(State=#state{
-			transport=Transport, key=Key, deflate_frame=DeflateFrame},
+			transport=Transport, key=Key, deflate_frame=DeflateFrame,
+            permessage_deflate=PermessageDeflate},
 		Req, HandlerState) ->
 	Challenge = base64:encode(crypto:hash(sha,
 		<< Key/binary, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" >>)),
-	Extensions = case DeflateFrame of
+	Extensions = case DeflateFrame andalso (PermessageDeflate =/= true) of
 		false -> [];
 		true -> [{<<"sec-websocket-extensions">>, <<"x-webkit-deflate-frame">>}]
 	end,
@@ -444,10 +482,18 @@ websocket_inflate_frame(Data, << Rsv1:1, _:2 >>, _,
 	{Data, State};
 websocket_inflate_frame(Data, << 1:1, _:2 >>, false, State) ->
 	Result = zlib:inflate(State#state.inflate_state, Data),
+    case State#state.inflate_takeover of
+        no_takeover -> zlib:inflateReset(State#state.inflate_state);
+        takeover -> ok
+    end,
 	{iolist_to_binary(Result), State};
 websocket_inflate_frame(Data, << 1:1, _:2 >>, true, State) ->
 	Result = zlib:inflate(State#state.inflate_state,
 		<< Data/binary, 0:8, 0:8, 255:8, 255:8 >>),
+    case State#state.inflate_takeover of
+        no_takeover -> zlib:inflateReset(State#state.inflate_state);
+        takeover -> ok
+    end,
 	{iolist_to_binary(Result), State}.
 
 -spec websocket_unmask(B, mask_key(), B) -> B when B::binary().
@@ -661,8 +707,13 @@ websocket_deflate_frame(Opcode, Payload,
 		State=#state{deflate_frame = DeflateFrame})
 		when DeflateFrame =:= false orelse Opcode >= 8 ->
 	{Payload, << 0:3 >>, State};
-websocket_deflate_frame(_, Payload, State=#state{deflate_state = Deflate}) ->
+websocket_deflate_frame(_, Payload, State=#state{deflate_state = Deflate,
+												 deflate_takeover=TakeOver}) ->
 	Deflated = iolist_to_binary(zlib:deflate(Deflate, Payload, sync)),
+    case TakeOver of
+        no_takeover -> zlib:deflateReset(Deflate);
+        takeover -> ok
+    end,
 	DeflatedBodyLength = erlang:size(Deflated) - 4,
 	Deflated1 = case Deflated of
 		<< Body:DeflatedBodyLength/binary, 0:8, 0:8, 255:8, 255:8 >> -> Body;
