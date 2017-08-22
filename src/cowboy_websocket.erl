@@ -96,6 +96,11 @@ websocket_upgrade(State, Req) ->
 	websocket_extensions(State#state{key=Key},
 		cowboy_req:set_meta(websocket_version, IntVersion, Req5)).
 
+-spec get_compression_opts() -> map().
+get_compression_opts() ->
+	Default = #{level => best_compression, mem_level => 8, strategy => default},
+	application:get_env(cowboy, compression_opts, Default).
+
 -spec websocket_extensions(#state{}, Req)
 	-> {ok, #state{}, Req} when Req::cowboy_req:req().
 websocket_extensions(State, Req) ->
@@ -113,7 +118,8 @@ websocket_extensions(State, Req) ->
 					ok = zlib:inflateInit(Inflate, -15),
 					% Initialize the deflater with a window size of 2^15 bits and disable
 					% the zlib headers.
-					ok = zlib:deflateInit(Deflate, best_compression, deflated, -15, 8, default),
+					#{level := Level, mem_level := MemLevel, strategy := Strategy} = get_compression_opts(),
+					ok = zlib:deflateInit(Deflate, Level, deflated, -15, MemLevel, Strategy),
 					{ok, State#state{
 						deflate_frame = true,
 						inflate_state = Inflate,
@@ -132,7 +138,7 @@ websocket_extensions2(Extensions, true, State, Req2) ->
     case lists:keyfind(<<"permessage-deflate">>, 1, Extensions) of
         {<<"permessage-deflate">>, Params} ->
             V2Extensions = #{},
-            Opts = #{level => best_compression, mem_level => 8, strategy => default},
+            Opts = get_compression_opts(),
             case cow_ws2:negotiate_permessage_deflate(Params, V2Extensions, Opts) of
                 ignore ->
                     {ok, State, cowboy_req:set_meta(websocket_compress, false, Req2)};
