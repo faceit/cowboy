@@ -9,3 +9,4 @@ ebin
 logs
 relx
 test/*.beam
+.erlang.mk/*

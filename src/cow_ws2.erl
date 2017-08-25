@@ -71,6 +71,7 @@ encode_key(Key) ->
 
 %% @doc Negotiate the permessage-deflate extension.
 
+-spec negotiate_permessage_deflate(list(), map(), list()) -> {ok, list(), list(), map()} | ignore.
 %% Ignore if deflate already negotiated.
 negotiate_permessage_deflate(_, #{deflate := _}, _) ->
 	ignore;
@@ -167,7 +168,7 @@ init_permessage_deflate(InflateWindowBits, DeflateWindowBits, Opts) ->
 %%
 %% The implementation is very basic and none of the parameters
 %% are currently supported.
-
+-spec negotiate_x_webkit_deflate_frame(list(), map(), list()) -> {ok, list(), list(), map()} | ignore.
 negotiate_x_webkit_deflate_frame(_, #{deflate := _}, _) ->
 	ignore;
 negotiate_x_webkit_deflate_frame(_Params, Extensions, Opts) ->
@@ -185,6 +186,7 @@ negotiate_x_webkit_deflate_frame(_Params, Extensions, Opts) ->
 %% @doc Validate the negotiated permessage-deflate extension.
 
 %% Error when more than one deflate extension was negotiated.
+-spec validate_permessage_deflate(list(), map(), list()) -> {ok, list(), list(), map()} | error.
 validate_permessage_deflate(_, #{deflate := _}, _) ->
 	error;
 validate_permessage_deflate(Params, Extensions, Opts) ->
