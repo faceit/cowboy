@@ -53,7 +53,8 @@
 	inflate_state :: undefined | port(),
 	deflate_state :: undefined | port(),
     deflate_takeover :: undefined | takeover | no_takeover,
-    inflate_takeover :: undefined | takeover | no_takeover
+    inflate_takeover :: undefined | takeover | no_takeover,
+    compression_monitor_module = cowboy_compression_monitor :: module()
 }).
 
 -spec upgrade(Req, Env, module(), any())
@@ -65,7 +66,8 @@ upgrade(Req, Env, Handler, HandlerOpts) ->
 	ranch:remove_connection(Ref),
 	[Socket, Transport] = cowboy_req:get([socket, transport], Req),
 	State = #state{env=Env, socket=Socket, transport=Transport,
-		handler=Handler},
+		handler=Handler,
+        compression_monitor_module=get_compression_monitor_module()},
 	try websocket_upgrade(State, Req) of
 		{ok, State2, Req2} ->
 			handler_init(State2, Req2, HandlerOpts)
@@ -100,6 +102,10 @@ websocket_upgrade(State, Req) ->
 get_compression_opts() ->
 	Default = #{level => best_compression, mem_level => 8, strategy => default},
 	application:get_env(cowboy, compression_opts, Default).
+
+get_compression_monitor_module() ->
+    Default = cowboy_compression_monitor,
+	application:get_env(cowboy, compression_monitor_module, Default).
 
 -spec websocket_extensions(#state{}, Req)
 	-> {ok, #state{}, Req} when Req::cowboy_req:req().
@@ -492,7 +498,9 @@ websocket_inflate_frame(Data, << 1:1, _:2 >>, false, State) ->
         no_takeover -> zlib:inflateReset(State#state.inflate_state);
         takeover -> ok
     end,
-	{iolist_to_binary(Result), State};
+    Uncompressed = iolist_to_binary(Result),
+    (State#state.compression_monitor_module):report_inflate(Uncompressed, Data),
+	{Uncompressed, State};
 websocket_inflate_frame(Data, << 1:1, _:2 >>, true, State) ->
 	Result = zlib:inflate(State#state.inflate_state,
 		<< Data/binary, 0:8, 0:8, 255:8, 255:8 >>),
@@ -500,7 +508,9 @@ websocket_inflate_frame(Data, << 1:1, _:2 >>, true, State) ->
         no_takeover -> zlib:inflateReset(State#state.inflate_state);
         takeover -> ok
     end,
-	{iolist_to_binary(Result), State}.
+    Uncompressed = iolist_to_binary(Result),
+    (State#state.compression_monitor_module):report_inflate(Uncompressed, Data),
+	{Uncompressed, State}.
 
 -spec websocket_unmask(B, mask_key(), B) -> B when B::binary().
 websocket_unmask(<<>>, _, Unmasked) ->
@@ -725,6 +735,7 @@ websocket_deflate_frame(_, Payload, State=#state{deflate_state = Deflate,
 		<< Body:DeflatedBodyLength/binary, 0:8, 0:8, 255:8, 255:8 >> -> Body;
 		_ -> Deflated
 	end,
+    (State#state.compression_monitor_module):report_deflate(Payload, Deflated1),
 	{Deflated1, << 1:1, 0:2 >>, State}.
 
 -spec websocket_send(frame(), #state{})
