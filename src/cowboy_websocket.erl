@@ -112,7 +112,7 @@ get_compression_monitor_module() ->
 websocket_extensions(State, Req) ->
 	case cowboy_req:parse_header(<<"sec-websocket-extensions">>, Req) of
 		{ok, Extensions, Req2} when Extensions =/= undefined ->
-			[Compress] = cowboy_req:get([resp_compress], Req),
+            Compress = get_compress_enabled(Req),
 			case lists:keyfind(<<"x-webkit-deflate-frame">>, 1, Extensions) of
 				{<<"x-webkit-deflate-frame">>, []} when Compress =:= true ->
 					Inflate = zlib:open(),
@@ -836,3 +836,12 @@ payload_length_to_binary(N) ->
 		N when N =< 16#ffff -> << 126:7, N:16 >>;
 		N when N =< 16#7fffffffffffffff -> << 127:7, N:64 >>
 	end.
+
+get_compress_enabled(Req) ->
+    case application:get_env(cowboy, override_compression_for_websockets, ignore) of
+        ignore ->
+            [Compress] = cowboy_req:get([resp_compress], Req),
+            Compress;
+        Other ->
+            Other
+    end.
