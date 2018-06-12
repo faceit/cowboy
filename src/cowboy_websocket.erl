@@ -19,6 +19,8 @@
 
 -export([upgrade/4]).
 -export([handler_loop/4]).
+-export([activate_socket/1]).
+-export([deactivate_socket/1]).
 
 -type close_code() :: 1000..4999.
 -export_type([close_code/0]).
@@ -234,16 +236,14 @@ websocket_handshake(State=#state{
 	-> {ok, Req, cowboy_middleware:env()}
 	| {suspend, module(), atom(), [any()]}
 	when Req::cowboy_req:req().
-handler_before_loop(State=#state{
-			socket=Socket, transport=Transport, hibernate=true},
+handler_before_loop(State=#state{hibernate=true},
 		Req, HandlerState, SoFar) ->
-	Transport:setopts(Socket, [{active, once}]),
+    {Req1, HandlerState1, State1} = maybe_activate(Req, HandlerState, State),
 	{suspend, ?MODULE, handler_loop,
-		[State#state{hibernate=false}, Req, HandlerState, SoFar]};
-handler_before_loop(State=#state{socket=Socket, transport=Transport},
-		Req, HandlerState, SoFar) ->
-	Transport:setopts(Socket, [{active, once}]),
-	handler_loop(State, Req, HandlerState, SoFar).
+		[State1#state{hibernate=false}, Req1, HandlerState1, SoFar]};
+handler_before_loop(State=#state{}, Req, HandlerState, SoFar) ->
+    {Req1, HandlerState1, State1} = maybe_activate(Req, HandlerState, State),
+	handler_loop(State1, Req1, HandlerState1, SoFar).
 
 -spec handler_loop_timeout(#state{}) -> #state{}.
 handler_loop_timeout(State=#state{timeout=infinity}) ->
@@ -273,6 +273,9 @@ handler_loop(State=#state{socket=Socket, messages={OK, Closed, Error},
 			websocket_close(State, Req, HandlerState, {normal, timeout});
 		{timeout, OlderTRef, ?MODULE} when is_reference(OlderTRef) ->
 			handler_loop(State, Req, HandlerState, SoFar);
+		cws_activate_socket ->
+			{Req1, HandlerState1, State1} = maybe_activate(Req, HandlerState, State),
+			handler_loop(State1, Req1, HandlerState1, SoFar);
 		Message ->
 			handler_call(State, Req, HandlerState,
 				SoFar, websocket_info, Message, fun handler_before_loop/4)
@@ -574,26 +577,30 @@ is_utf8(_) ->
 	-> {ok, Req, cowboy_middleware:env()}
 	| {suspend, module(), atom(), [any()]}
 	when Req::cowboy_req:req().
-websocket_payload_loop(State=#state{socket=Socket, transport=Transport,
+websocket_payload_loop(State=#state{socket=Socket,
 		messages={OK, Closed, Error}, timeout_ref=TRef},
 		Req, HandlerState, Opcode, Len, MaskKey, Unmasked, UnmaskedLen, Rsv) ->
-	Transport:setopts(Socket, [{active, once}]),
+    {Req1, HandlerState1, State1} = maybe_activate(Req, HandlerState, State),
 	receive
 		{OK, Socket, Data} ->
-			State2 = handler_loop_timeout(State),
-			websocket_payload(State2, Req, HandlerState,
+			State2 = handler_loop_timeout(State1),
+			websocket_payload(State2, Req1, HandlerState1,
 				Opcode, Len, MaskKey, Unmasked, UnmaskedLen, Data, Rsv);
 		{Closed, Socket} ->
-			handler_terminate(State, Req, HandlerState, {error, closed});
+			handler_terminate(State1, Req1, HandlerState1, {error, closed});
 		{Error, Socket, Reason} ->
-			handler_terminate(State, Req, HandlerState, {error, Reason});
+			handler_terminate(State1, Req1, HandlerState1, {error, Reason});
 		{timeout, TRef, ?MODULE} ->
-			websocket_close(State, Req, HandlerState, {normal, timeout});
+			websocket_close(State1, Req1, HandlerState1, {normal, timeout});
 		{timeout, OlderTRef, ?MODULE} when is_reference(OlderTRef) ->
-			websocket_payload_loop(State, Req, HandlerState,
+			websocket_payload_loop(State1, Req1, HandlerState1,
 				Opcode, Len, MaskKey, Unmasked, UnmaskedLen, Rsv);
+		cws_activate_socket ->
+            %% maybe_activate is first call in websocket_payload_loop
+            websocket_payload_loop(State1, Req1, HandlerState1,
+                                   Opcode, Len, MaskKey, Unmasked, UnmaskedLen, Rsv);
 		Message ->
-			handler_call(State, Req, HandlerState,
+			handler_call(State1, Req1, HandlerState1,
 				<<>>, websocket_info, Message,
 				fun (State2, Req2, HandlerState2, _) ->
 					websocket_payload_loop(State2, Req2, HandlerState2,
@@ -845,3 +852,28 @@ get_compress_enabled(Req) ->
         Other ->
             Other
     end.
+
+maybe_activate(Req, HandlerState, State = #state{socket=Socket, transport=Transport}) ->
+	{Active, Req2} = cowboy_req:meta(active_socket, Req, true),
+	case Active of
+		true ->
+			Transport:setopts(Socket, [{active, once}]);
+		false ->
+			Transport:setopts(Socket, [{active, false}])
+	end,
+	{Req2, HandlerState, State}.
+
+-spec activate_socket(Req) -> Req when Req::cowboy_req:req().
+activate_socket(Req) ->
+	{WasActive, Req2} = cowboy_req:meta(active_socket, Req, true),
+	case WasActive of
+		true ->
+			Req2;
+		false ->
+			self() ! cws_activate_socket,
+			cowboy_req:set_meta(active_socket, true, Req2)
+	end.
+
+-spec deactivate_socket(Req) -> Req when Req::cowboy_req:req().
+deactivate_socket(Req) ->
+	cowboy_req:set_meta(active_socket, false, Req).
