@@ -865,7 +865,7 @@ maybe_activate(Req, HandlerState, State = #state{socket=Socket, transport=Transp
 
 -spec activate_socket(Req) -> Req when Req::cowboy_req:req().
 activate_socket(Req) ->
-	{WasActive, Req2} = cowboy_req:meta(active_socket, Req, true),
+	{WasActive, Req2} = cowboy_req:meta(active_socket, Req, false),
 	case WasActive of
 		true ->
 			Req2;
